@@ -1,0 +1,368 @@
+// ------------------------ GENERAL HELPER TYPES ------------------------
+
+type Nullable<T> = T | null
+
+
+// ------------------------ NOTES ------------------------
+
+
+/*
+    # Flat (original)
+    
+    root: <root_id>  // key is absent, implicitly assumed to be the node without parent
+    mapping:
+        <root_id>:
+            id: <root_id>
+            message: 
+                id: <root_id>
+                <CONTENT>
+            parent: null
+            children: [<child_1_id>, <child_2_id>, ...] 
+        <child_1_id>: ...
+        <child_2_id>: ...    
+    
+    # Nested
+    
+    root:
+        id: <root_id>
+        message: <CONTENT>
+        parent: null
+        children: [
+            id: <child_1_id>
+            // ...
+        , 
+            id: <child_2_id>
+            // ...
+        ]
+        
+    # Linear
+    
+    [
+        kind: "message"
+        id: <root_id>
+        message: <CONTENT>
+    ,
+        kind: "split"
+        branches:
+            branch1: [
+                kind: "message"
+                id: <child_1_id>
+                ...
+            ,
+                ...
+            ]
+            branch2: [
+                kind: "message"
+                id: <child_2_id>
+                ...
+            ,
+                ...
+            ]
+        ]
+    ]
+*/
+
+
+// ------------------------ ORIGINAL TYPES ------------------------
+
+
+type referencedId = string
+
+// TODO Some of the following type variants are incomplete!
+type MessageContent =    
+    | { content_type: "text", parts: string[] }
+    | { content_type: "code", text: string }
+    | { content_type: "multimodal_text", asset_pointer: string }
+    | { content_type: "execution_output", text: string }
+    | { content_type: "tether_browsing_display", result: string }
+    | { content_type: "tether_quote", url: string, domain: string, text: string }
+    | { content_type: "system_error", text: string }
+
+type Message =
+    id: string
+    author: { role: "system" | "assistant" | "user" | "tool", name: (Nullable string), metadata: object }
+    create_time: Nullable number
+    update_time: Nullable number
+    content: MessageContent
+    status: string | "finished_successfully"
+    end_turn: boolean
+    weight: number
+    metadata: object & { is_visually_hidden_from_conversation: boolean }
+    recipient: string | "all"
+    channel: Nullable any
+
+
+
+type MessageNode =
+    id: referencedId // === message.id
+    message: Message
+    parent: referencedId
+    children: referencedId[]
+
+type RootNode =
+    id: "client-created-root"
+    message: null
+    parent: null
+    children: referencedId[]    
+
+type Node =
+    id: string | referencedId
+    message: Nullable Message
+    parent: Nullable string
+    children: referencedId[]
+
+
+
+type Conversation =
+    title: string
+    create_time: Nullable number
+    update_time: Nullable number
+
+    mapping: Record<referencedId, Node>
+
+    moderation_results: any[]
+    current_node: referencedId
+    plugin_ids: Nullable any
+    conversation_id: referencedId // TODO Is this always the same as id?
+    conversation_template_id: Nullable string
+    gizmo_id: Nullable string
+    gizmo_type: Nullable any
+    is_archived: boolean
+    is_starred: Nullable any
+    safe_urls: any[]
+    blocked_urls: any[]
+    default_model_slug: Nullable any
+    conversation_origin: Nullable any
+    voice: Nullable any
+    async_status: Nullable any
+    disabled_tool_ids: any[]
+    is_do_not_remember: Nullable any
+    id: string
+
+findNodeWithNullMessage := ({
+    mapping:: Record<referencedId, Node>
+}) ->
+    for key in mapping
+        if mapping[key]!.message is null
+            return mapping[key]!
+    undefined
+
+
+// ------------------------ SIMPLIFIED TYPES ------------------------
+
+
+getTeaserBody := ({
+    content:: MessageContent
+    length:: number
+}) ->
+    switch content.content_type
+        when "text"
+            content.parts.at(0)?.split("\n")?.at(0) ?? ""
+            |> .slice 0, length
+        when "code"
+            content.text.split("\n")?.at(0) ?? ""
+            |> .slice 0, length
+        when "multimodal_text"
+            content.asset_pointer
+        when "execution_output"
+            content.text.split("\n")?.at(0) ?? ""
+            |> .slice 0, length
+        when "tether_browsing_display"
+            content.result.split("\n")?.at(0) ?? ""
+            |> .slice 0, length
+        when "tether_quote"
+            content.text.split("\n")?.at(0) ?? ""
+            |> .slice 0, length // TODO shorten
+            |> (text) => `${content.url} | ${text}`
+        when "system_error"
+            content.text.split("\n")?.at(0) ?? ""
+            |> .slice 0, length
+        else
+            "UNKNOWN"
+
+getSimplifiedContentProps := ({
+    content:: MessageContent
+}) ->
+    switch content.content_type
+        when "text"
+            value: content.parts[0]
+        when "code"
+            text: content.text
+        when "multimodal_text"
+            asset_pointer: content.asset_pointer
+        when "execution_output"
+            text: content.text
+        when "tether_browsing_display"
+            result: content.result
+        when "tether_quote"
+            url: content.url
+            domain: content.domain
+            text: content.text
+        when "system_error"
+            text: content.text
+        else
+            original_content: content
+
+type SimplifiedMessage = 
+    & {
+        id: string
+
+        teaser: string
+        author: "system" | "assistant" | "user" | `tool(${string})`  
+        content_type: MessageContent["content_type"]
+    }
+    & ReturnType<typeof getSimplifiedContentProps>
+
+
+
+type BranchingMessageListEntry =
+    | SimplifiedMessage
+    | { content_type: "split", branches: { [key: `branch${number}`]: BranchingMessageList } }
+
+type BranchingMessageList = BranchingMessageListEntry[]
+
+
+
+type SimplifiedConversation =
+    id: string
+
+    title: string
+    create_time: Nullable string
+    update_time: Nullable string
+
+    messages: BranchingMessageList
+
+
+// ------------------------ CONVERSION FUNCTIONS ------------------------
+
+
+export simplifyMessage := ({
+    src:: Message 
+}) ->
+    id := src.id
+    
+    author := 
+        if src.author.role === "tool"
+            `tool(${src.author.name!})` as const
+        else
+            src.author.role as ("system" | "assistant" | "user")
+    simplifiedContentProps := getSimplifiedContentProps content: src.content
+    content_type := src.content.content_type
+
+    teaserPrefix := `[${content_type}][${author}] `
+    teaser := `${teaserPrefix}${getTeaserBody { content: src.content, length: 70 - teaserPrefix.length }}`
+
+    { teaser, id, author, content_type, ...simplifiedContentProps } satisfies SimplifiedMessage
+
+export unflattenNodeMapping := ({ // Flat -> Linear
+    nodeId:: string
+    mapping:: Record<string, Node>
+    result:: BranchingMessageListEntry[] = []
+    visitedNodeIds:: Set<referencedId> = new Set()
+}): BranchingMessageListEntry[] ->
+    node := mapping[nodeId]
+
+    if visitedNodeIds.has nodeId
+        console.log `encountered already visited node at id ${nodeId}`
+        throw new Error() // but this has proven to never happen
+    if node.message === null
+        console.log `encountered message === null at id ${nodeId}`
+        throw new Error() // but this has proven to never happen
+    
+    simplifiedMessage := simplifyMessage src: node.message
+    
+    if node.children.length === 0
+        // End of branch
+        result
+    else if node.children.length === 1
+        // Inner node of branch
+        result.push simplifiedMessage
+        unflattenNodeMapping {}
+            nodeId: node.children[0]
+            mapping
+            result
+            visitedNodeIds
+    else
+        // Node after which a split occurs
+        branchesObject := {}
+        node.children.forEach (childId, childIndex) =>
+            branchesObject[`branch${childIndex + 1}`] =
+                unflattenNodeMapping {}
+                    nodeId: childId
+                    mapping
+                    result: [] // each branch creates its own result list
+                    visitedNodeIds // duplicate nodeIds are tracked globally
+        result.push simplifiedMessage
+        result.push {}
+            teaser: "[split] "
+            content_type: "split"
+            ...branchesObject
+        // This is the last entry of the parent result list
+        result
+
+export simplifyConversation := ({ 
+    src:: Conversation
+}) ->
+    id := src.id
+    
+    title := src.title
+    create_time := src.create_time === null ? null :
+        new Date(src.create_time * 1000).toISOString().replace('T', ' ').slice(0, 19)
+    update_time := src.update_time === null ? null :
+        new Date(src.update_time * 1000).toISOString().replace('T', ' ').slice(0, 19)
+    
+    rootNodeId := (findNodeWithNullMessage mapping: src.mapping)! |> .children[0]
+    messages := unflattenNodeMapping nodeId: rootNodeId, mapping: src.mapping
+    
+    { title, id, create_time, update_time, messages } satisfies SimplifiedConversation
+
+export groupConversations := ({
+    data:: SimplifiedConversation[]
+}) ->
+    result: Record<string, SimplifiedConversation[]> := {}
+    
+    for conversation of data
+        yearMonth := 
+            if conversation.create_time
+                conversation.create_time.substring(0, 7) // Gets "YYYY-MM"
+            else
+                "without create_time"
+        if !result[yearMonth]
+            result[yearMonth] = []
+        result[yearMonth].push conversation
+    
+    result
+
+
+// ------------------------ USAGE ------------------------
+
+
+import fs from 'fs'
+import yaml from 'yaml'
+
+inputJson := (JSON.parse (fs.readFileSync 'original/conversations.json', 'utf8')) as Conversation[]
+
+simplifiedConversations := 
+    inputJson
+    |> .map (src) => simplifyConversation { src }
+    |> (data) => groupConversations { data }
+
+escapeUnicode := ({ 
+    value: str:: string 
+}) ->
+    str.replace /[\u{10000}-\u{10FFFF}]/u, (char) =>
+        codePoint := (char.codePointAt 0)!
+        `\\U${codePoint.toString(16).padStart(6, '0')}`
+
+fs.mkdirSync 'simplified', recursive: true
+
+simplifiedConversations
+|> Object.entries
+|> .map ([key, conversations]) ->
+    fs.writeFileSync
+        `simplified/${key}.yaml`
+        yaml.stringify
+            { conversations }
+            (key: string, value: any) =>
+                typeof value === "string" ? escapeUnicode { value } : value
+            blockQuote: "literal", lineWidth: 90, indent: 4, indentSeq: false, singleQuote: true
